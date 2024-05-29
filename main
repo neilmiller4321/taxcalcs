@@ -1,0 +1,231 @@
+from flask import Flask, request, render_template
+import pandas as pd
+
+app = Flask(__name__)
+
+# Constants for the 2024/25 tax year
+PERSONAL_ALLOWANCE = 12570
+ALLOWANCE_LOSS_THRESHOLD = 100000
+ALLOWANCE_LOSS_LIMIT = 125140
+BASIC_RATE_THRESHOLD = 50270
+HIGHER_RATE_THRESHOLD = 150000
+BASIC_RATE = 0.20
+HIGHER_RATE = 0.40
+ADDITIONAL_RATE = 0.45
+
+# Constants for Scottish Tax Rates
+SCOTTISH_PERSONAL_ALLOWANCE = 12570
+SCOTTISH_STARTER_RATE_THRESHOLD = 14876
+SCOTTISH_BASIC_RATE_THRESHOLD = 26561
+SCOTTISH_INTERMEDIATE_RATE_THRESHOLD = 43662
+SCOTTISH_HIGHER_RATE_THRESHOLD = 75000
+SCOTTISH_ADVANCED_RATE_THRESHOLD = 125140
+
+SCOTTISH_STARTER_RATE = 0.19
+SCOTTISH_BASIC_RATE = 0.20
+SCOTTISH_INTERMEDIATE_RATE = 0.21
+SCOTTISH_HIGHER_RATE = 0.42
+SCOTTISH_ADVANCED_RATE = 0.45
+SCOTTISH_TOP_RATE = 0.48
+
+
+NI_LOWER_THRESHOLD = 12570
+NI_UPPER_THRESHOLD = 50270
+NI_BASIC_RATE = 0.08
+NI_HIGHER_RATE = 0.02
+
+# Student loan thresholds and rates for different plans
+STUDENT_LOAN_PLANS = {
+    'plan_1': {'threshold': 22015, 'rate': 0.09},
+    'plan_2': {'threshold': 27295, 'rate': 0.09},
+    'plan_4': {'threshold': 27295, 'rate': 0.09},
+    'postgrad': {'threshold': 21000, 'rate': 0.06}
+}
+
+def calculate_personal_allowance(income):
+    if income <= ALLOWANCE_LOSS_THRESHOLD:
+        return SCOTTISH_PERSONAL_ALLOWANCE
+    elif income <= ALLOWANCE_LOSS_LIMIT:
+        return SCOTTISH_PERSONAL_ALLOWANCE - ((income - ALLOWANCE_LOSS_THRESHOLD) / 2)
+    else:
+        return 0
+
+def calculate_scottish_tax(salary):
+    personal_allowance = calculate_personal_allowance(salary)
+    taxable_salary = max(0, salary - personal_allowance)
+    tax = 0
+
+    # Apply Starter Rate
+    if taxable_salary > 0:
+        starter_rate_taxable = min(taxable_salary, SCOTTISH_STARTER_RATE_THRESHOLD - personal_allowance)
+        tax += starter_rate_taxable * SCOTTISH_STARTER_RATE
+        taxable_salary -= starter_rate_taxable
+
+    # Apply Basic Rate
+    if taxable_salary > 0:
+        basic_rate_taxable = min(taxable_salary, SCOTTISH_BASIC_RATE_THRESHOLD - SCOTTISH_STARTER_RATE_THRESHOLD)
+        tax += basic_rate_taxable * SCOTTISH_BASIC_RATE
+        taxable_salary -= basic_rate_taxable
+
+    # Apply Intermediate Rate
+    if taxable_salary > 0:
+        intermediate_rate_taxable = min(taxable_salary, SCOTTISH_INTERMEDIATE_RATE_THRESHOLD - SCOTTISH_BASIC_RATE_THRESHOLD)
+        tax += intermediate_rate_taxable * SCOTTISH_INTERMEDIATE_RATE
+        taxable_salary -= intermediate_rate_taxable
+
+    # Apply Higher Rate
+    if taxable_salary > 0:
+        higher_rate_taxable = min(taxable_salary, SCOTTISH_HIGHER_RATE_THRESHOLD - SCOTTISH_INTERMEDIATE_RATE_THRESHOLD)
+        tax += higher_rate_taxable * SCOTTISH_HIGHER_RATE
+        taxable_salary -= higher_rate_taxable
+
+    # Apply Advanced Rate
+    if taxable_salary > 0:
+        advanced_rate_taxable = min(taxable_salary, SCOTTISH_ADVANCED_RATE_THRESHOLD - SCOTTISH_HIGHER_RATE_THRESHOLD)
+        tax += advanced_rate_taxable * SCOTTISH_ADVANCED_RATE
+        if salary > ALLOWANCE_LOSS_THRESHOLD:
+            tax += (min(salary, SCOTTISH_ADVANCED_RATE_THRESHOLD) - ALLOWANCE_LOSS_THRESHOLD) * 0.13
+        taxable_salary -= advanced_rate_taxable
+
+    # Apply Top Rate
+    if taxable_salary > 0:
+        tax += taxable_salary * SCOTTISH_TOP_RATE
+
+    return tax
+
+def calculate_tax(salary):
+    personal_allowance = calculate_personal_allowance(salary)
+    taxable_salary = max(0, salary - personal_allowance)
+    tax = 0
+
+    # Apply Basic Rate
+    if taxable_salary > 0:
+        basic_rate_taxable = min(taxable_salary, 37700)  # Adjusting for the basic rate threshold after personal allowance
+        tax += basic_rate_taxable * BASIC_RATE
+        taxable_salary -= basic_rate_taxable
+
+    # Apply Higher Rate
+    if taxable_salary > 0:
+        higher_rate_taxable = min(taxable_salary, 125140 - 37700)
+        tax += higher_rate_taxable * HIGHER_RATE
+        taxable_salary -= higher_rate_taxable
+
+    # Apply Additional Rate
+    if taxable_salary > 0:
+        tax += taxable_salary * ADDITIONAL_RATE
+
+    return tax
+
+def calculate_ni(salary):
+    if salary <= NI_LOWER_THRESHOLD:
+        return 0
+    elif salary <= NI_UPPER_THRESHOLD:
+        return (salary - NI_LOWER_THRESHOLD) * NI_BASIC_RATE
+    else:
+        return (NI_UPPER_THRESHOLD - NI_LOWER_THRESHOLD) * NI_BASIC_RATE + (salary - NI_UPPER_THRESHOLD) * NI_HIGHER_RATE
+
+def calculate_student_loan(salary, plan):
+    if plan not in STUDENT_LOAN_PLANS:
+        return 0
+    threshold = STUDENT_LOAN_PLANS[plan]['threshold']
+    rate = STUDENT_LOAN_PLANS[plan]['rate']
+    if salary <= threshold:
+        return 0
+    else:
+        return (salary - threshold) * rate
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        gross_salary = max(0, float(request.form['gross_salary']))
+        pension_type = request.form['pension_type']
+        pension_value = max(0, float(request.form['pension_value']) if request.form['pension_value'] else 0)
+        pension_value_type = request.form['pension_value_type']
+        bonus = max(0, float(request.form['bonus']) if request.form['bonus'] else 0)
+        student_loan_plan = request.form['student_loan_plan']
+        is_scottish = 'scotland' in request.form
+
+        if pension_value_type == 'percentage' and pension_value > 0:
+            pension_contribution = gross_salary * (pension_value / 100)
+        elif pension_value_type == 'nominal' and pension_value > 0:
+            pension_contribution = pension_value
+        else:
+            pension_contribution = 0
+
+        taxable_income = gross_salary - pension_contribution
+        taxable_income_with_bonus = taxable_income + bonus
+
+        if is_scottish:
+            annual_tax = calculate_scottish_tax(taxable_income_with_bonus)
+        else:
+            annual_tax = calculate_tax(taxable_income_with_bonus)
+
+        annual_ni = calculate_ni(taxable_income_with_bonus)
+        annual_student_loan = calculate_student_loan(taxable_income_with_bonus, student_loan_plan)
+        annual_take_home = taxable_income_with_bonus - annual_tax - annual_ni - annual_student_loan
+
+        weekly_gross = gross_salary / 52
+        weekly_tax = annual_tax / 52
+        weekly_ni = annual_ni / 52
+        weekly_student_loan = annual_student_loan / 52
+        weekly_take_home = annual_take_home / 52
+
+        monthly_gross = gross_salary / 12
+        monthly_tax = annual_tax / 12
+        monthly_ni = annual_ni / 12
+        monthly_student_loan = annual_student_loan / 12
+        monthly_take_home = annual_take_home / 12
+        bonus_month_take_home = (monthly_take_home + bonus)  # Bonus is only in one month
+
+        data = {
+            'Period': ['Monthly', 'Annual'],
+            'Gross Salary': [f'£{monthly_gross:,.2f}', f'£{gross_salary + bonus:,.2f}'],
+            'Taxable Income': [f'£{(taxable_income / 12):,.2f}', f'£{taxable_income:,.2f}'],
+            'Tax Paid': [f'£{monthly_tax:,.2f}', f'£{annual_tax:,.2f}'],
+            'NI Paid': [f'£{monthly_ni:,.2f}', f'£{annual_ni:,.2f}']
+        }
+
+        if bonus > 0:
+            data['Period'].insert(1, 'Bonus Month')
+            data['Gross Salary'].insert(1, f'£{monthly_gross + bonus:,.2f}')
+            data['Taxable Income'].insert(1, f'£{(taxable_income / 12 + bonus):,.2f}')
+            data['Tax Paid'].insert(1, f'£{(monthly_tax + bonus * BASIC_RATE):,.2f}')
+            data['NI Paid'].insert(1, f'£{monthly_ni:,.2f}')
+            data['Take Home Pay'] = [f'£{monthly_take_home:,.2f}', f'£{bonus_month_take_home:,.2f}', f'£{annual_take_home:,.2f}']
+        else:
+            data['Period'].insert(0, 'Weekly')
+            data['Gross Salary'].insert(0, f'£{weekly_gross:,.2f}')
+            data['Taxable Income'].insert(0, f'£{(taxable_income / 52):,.2f}')
+            data['Tax Paid'].insert(0, f'£{weekly_tax:,.2f}')
+            data['NI Paid'].insert(0, f'£{weekly_ni:,.2f}')
+            data['Take Home Pay'] = [f'£{weekly_take_home:,.2f}', f'£{monthly_take_home:,.2f}', f'£{annual_take_home:,.2f}']
+
+        if pension_value > 1:
+            pensions = [f'£{(pension_contribution / 12):,.2f}', f'£{pension_contribution:,.2f}']
+            if bonus > 0:
+                pensions.insert(1, f'£{(pension_contribution / 12):,.2f}')
+            else:
+                pensions.insert(0, f'£{(pension_contribution / 52):,.2f}')
+            data['Pension Contributions'] = pensions
+
+        if student_loan_plan:
+            loans = [f'£{monthly_student_loan:,.2f}', f'£{annual_student_loan:,.2f}']
+            if bonus > 0:
+                loans.insert(1, f'£{(monthly_student_loan + bonus * STUDENT_LOAN_PLANS[student_loan_plan]["rate"]):,.2f}')
+            else:
+                loans.insert(0, f'£{weekly_student_loan:,.2f}')
+            data['Student Loan'] = loans
+
+        # Ensure Take Home Pay is the rightmost column
+        take_home_pay = data.pop('Take Home Pay')
+        data['Take Home Pay'] = take_home_pay
+
+        df = pd.DataFrame(data)
+
+        return render_template('result.html', tables=[df.to_html(classes='data', header="true", index=False)])
+
+    return render_template('index.html')
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
